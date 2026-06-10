@@ -100,9 +100,9 @@ lab/
 ├── data/
 │   ├── docs/                 # 5 tài liệu gốc (policy, SLA, FAQ, HR, access control)
 │   ├── raw/
-│   │   └── policy_export_dirty.csv   # Export bẩn từ 5 hệ thống nguồn
-│   ├── test_questions.json           # 21 câu tự kiểm (retrieval + keyword)
-│   └── grading_questions.json        # 10 câu đánh giá chính thức
+│   │   └── policy_export_dirty.csv   # Export bẩn mẫu
+│   ├── test_questions.json           # Golden retrieval (4 câu)
+│   └── grading_questions.json        # Câu chấm (GV public 17:00)
 │
 ├── artifacts/
 │   ├── logs/
@@ -122,6 +122,7 @@ lab/
 │   └── individual/
 │       └── template.md
 │
+├── demo.html                 # Dashboard demo pipeline (mở bằng trình duyệt)
 ├── requirements.txt
 └── .env.example
 ```
@@ -139,6 +140,337 @@ cp .env.example .env
 ```
 
 **Lần đầu** SentenceTransformers có thể tải model `all-MiniLM-L6-v2` (~90MB) — cần mạng.
+
+> **Windows (PowerShell):** `copy .env.example .env` thay cho `cp`.
+
+---
+
+## Hướng dẫn chạy từng bước & kết quả đạt được
+
+Phần này mô tả **thứ tự chạy thực tế** trên môi trường lab và **artifact đã sinh ra** (baseline + các lần chạy mẫu). Dùng làm checklist khi làm bài hoặc peer review.
+
+### Luồng tổng quan
+
+```
+raw CSV  →  clean_rows()  →  cleaned + quarantine CSV
+         →  run_expectations()  →  halt hoặc tiếp tục
+         →  embed Chroma (upsert + prune)  →  manifest + log
+         →  freshness_check  →  eval_retrieval / grading_run
+```
+
+| Bước | Lệnh | Output chính |
+|------|------|----------------|
+| 0 | Setup (venv + pip) | `.venv/`, packages |
+| 1 | `etl_pipeline.py run --run-id sprint1` | log, cleaned, quarantine, manifest |
+| 2 | `etl_pipeline.py run` | run chuẩn + embed |
+| 3 | `eval_retrieval.py` | CSV eval retrieval |
+| 4 | Inject Sprint 3 | log + eval so sánh |
+| 5 | `freshness --manifest …` | PASS/WARN/FAIL |
+| 6 | `grading_run.py` (sau 17:00) | `grading_run.jsonl` |
+
+**Demo trực quan:** mở [`demo.html`](demo.html) trong trình duyệt (dashboard pipeline + expectations + eval).
+
+### Bản đồ file → hàm (tham chiếu nhanh)
+
+| File | Entrypoint | Hàm chính |
+|------|------------|-----------|
+| `etl_pipeline.py` | `main()` → `cmd_run` / `cmd_freshness` | Điều phối toàn pipeline |
+| `transform/cleaning_rules.py` | (gọi từ `cmd_run`) | `load_raw_csv`, `clean_rows`, `write_*_csv` |
+| `quality/expectations.py` | (gọi từ `cmd_run`) | `run_expectations` |
+| `monitoring/freshness_check.py` | (gọi từ `cmd_run` / `cmd_freshness`) | `check_manifest_freshness`, `parse_iso` |
+| `eval_retrieval.py` | `main()` | Query Chroma + ghi CSV eval |
+| `grading_run.py` | `main()` | Giống eval, output JSONL |
+
+---
+
+## Giải thích hàm theo từng bước
+
+### `etl_pipeline.py run` — chuỗi gọi hàm
+
+Lệnh `python etl_pipeline.py run` vào `main()` → parse args → gọi **`cmd_run(args)`**:
+
+| Thứ tự | Hàm | File | Làm gì |
+|--------|-----|------|--------|
+| 1 | `load_raw_csv(path)` | `cleaning_rules.py` | Đọc CSV raw → `List[Dict]` (strip từng field) |
+| 2 | `clean_rows(rows, apply_refund_window_fix=…)` | `cleaning_rules.py` | Áp rule cleaning → `(cleaned, quarantine)` |
+| 3 | `write_cleaned_csv` / `write_quarantine_csv` | `cleaning_rules.py` | Ghi `artifacts/cleaned/*.csv` và `quarantine/*.csv` |
+| 4 | `run_expectations(cleaned)` | `expectations.py` | Chạy suite kiểm tra → `(results, should_halt)` |
+| 5 | `cmd_embed_internal(cleaned_csv, …)` | `etl_pipeline.py` | Embed Chroma: prune + upsert |
+| 6 | Ghi manifest JSON | `cmd_run` | Tổng hợp metadata run |
+| 7 | `check_manifest_freshness(man_path)` | `freshness_check.py` | Kiểm tra SLA freshness (chỉ log) |
+
+Hàm log nội bộ: `_log(path, line)` — append từng dòng vào `artifacts/logs/run_<run-id>.log`.
+
+**Exit code `cmd_run`:** `0` OK · `1` thiếu raw · `2` expectation halt · `3` lỗi embed.
+
+---
+
+### `clean_rows()` — rule cleaning (baseline)
+
+Gọi trong bước 2 của `cmd_run`. Với **mỗi dòng raw**, kiểm tra lần lượt:
+
+| Rule (logic trong vòng lặp) | Hàm phụ | Kết quả nếu fail |
+|-----------------------------|---------|------------------|
+| `doc_id` ∈ `ALLOWED_DOC_IDS` | — | quarantine `unknown_doc_id` |
+| Chuẩn hoá `effective_date` | `_normalize_effective_date()` | quarantine `missing_effective_date` / `invalid_effective_date_format` |
+| HR cũ (`hr_leave_policy` + ngày &lt; 2026-01-01) | — | quarantine `stale_hr_policy_effective_date` |
+| `chunk_text` không rỗng | — | quarantine `missing_chunk_text` |
+| Dedupe nội dung | `_norm_text()` + `seen_text` | quarantine `duplicate_chunk_text` |
+| Fix refund 14→7 ngày | (nếu `apply_refund_window_fix=True`) | giữ trong cleaned, thêm tag `[cleaned: stale_refund_window]` |
+| Sinh `chunk_id` ổn định | `_stable_chunk_id()` | append vào `cleaned` |
+
+Flag CLI ảnh hưởng cleaning:
+
+- `--no-refund-fix` → bỏ qua bước fix refund (dùng cho inject Sprint 3).
+
+---
+
+### `run_expectations()` — validate sau clean
+
+Input: list `cleaned` (không quarantine). Output: `(results, halt)`.
+
+| Expectation | Severity | Kiểm tra |
+|-------------|----------|----------|
+| `min_one_row` | halt | `len(cleaned) >= 1` |
+| `no_empty_doc_id` | halt | Không có `doc_id` rỗng |
+| `refund_no_stale_14d_window` | halt | Refund không còn chuỗi `14 ngày làm việc` |
+| `chunk_min_length_8` | warn | Mọi chunk ≥ 8 ký tự |
+| `effective_date_iso_yyyy_mm_dd` | halt | Regex `YYYY-MM-DD` |
+| `hr_leave_no_stale_10d_annual` | halt | HR không còn `10 ngày phép năm` |
+
+`halt = True` khi **bất kỳ** expectation severity `halt` nào fail. `cmd_run` dừng embed trừ khi có `--skip-validate`.
+
+---
+
+### `cmd_embed_internal()` — publish vector store
+
+| Bước | Code | Ý nghĩa |
+|------|------|---------|
+| Đọc cleaned CSV | `load_raw_csv(cleaned_csv)` | Tái dùng loader CSV |
+| Kết nối Chroma | `PersistentClient` + `SentenceTransformerEmbeddingFunction` | Model từ `.env` (`EMBEDDING_MODEL`) |
+| Prune | `col.get()` → `col.delete(ids=drop)` | Xóa vector id **có trong DB** nhưng **không** còn trong cleaned run hiện tại |
+| Upsert | `col.upsert(ids, documents, metadatas)` | Idempotent theo `chunk_id`; metadata: `doc_id`, `effective_date`, `run_id` |
+
+---
+
+### `check_manifest_freshness()` — freshness
+
+Gọi cuối `cmd_run` (ghi log) hoặc qua subcommand `freshness`.
+
+1. `json.loads(manifest)` → lấy `latest_exported_at`
+2. `parse_iso(ts)` — parse ngày (hỗ trợ có/không timezone)
+3. `age_hours = (now - dt).total_seconds() / 3600`
+4. `age_hours <= sla_hours` → **PASS**, ngược lại → **FAIL** `freshness_sla_exceeded`
+
+Không chặn pipeline — chỉ observability.
+
+---
+
+### `eval_retrieval.py` — `main()`
+
+| Bước | Logic |
+|------|--------|
+| Đọc `test_questions.json` | Danh sách câu + `must_contain_any` / `must_not_contain` |
+| `col.query(query_texts, n_results=top_k)` | Semantic search trên Chroma |
+| Ghép toàn bộ top-k | `blob = " ".join(docs).lower()` |
+| `contains_expected` | Có keyword kỳ vọng trong blob |
+| `hits_forbidden` | Có keyword cấm trong blob (vd. `14 ngày`) |
+| `top1_doc_expected` | So `metadatas[0].doc_id` với `expect_top1_doc_id` |
+| Ghi CSV | `artifacts/eval/before_after_eval.csv` |
+
+---
+
+### `grading_run.py` — `main()`
+
+Giống `eval_retrieval.py` nhưng:
+
+- Input: `data/grading_questions.json` (GV public 17:00)
+- Output: **JSONL** — mỗi dòng 1 object JSON (`id`, `contains_expected`, `hits_forbidden`, …)
+- Dùng cho chấm điểm `gq_d10_01` … `gq_d10_03`
+
+---
+
+### Bước 0 — Setup
+
+```powershell
+cd lab
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+---
+
+### Bước 1 — Sprint 1: Ingest & schema
+
+**Hàm chạy:** `main()` → `cmd_run()` → `load_raw_csv()` → `clean_rows()` → `write_*_csv()` → `run_expectations()` → `cmd_embed_internal()` → ghi manifest → `check_manifest_freshness()`.
+
+**Việc làm:**
+
+1. Đọc `data/raw/policy_export_dirty.csv` (10 dòng — duplicate, refund 14 ngày, HR cũ, `doc_id` lạ, ngày `DD/MM/YYYY`, dòng trống).
+2. Điền **source map** trong `docs/data_contract.md` (≥2 nguồn / failure mode / metric).
+3. Chạy pipeline với `run_id` cố định:
+
+```powershell
+python etl_pipeline.py run --run-id sprint1
+```
+
+**Kết quả đạt được (`run_id=sprint1`):**
+
+| Chỉ số | Giá trị |
+|--------|---------|
+| `raw_records` | 10 |
+| `cleaned_records` | 6 |
+| `quarantine_records` | 4 |
+| Expectations | 6/6 OK (không halt) |
+| Embed | `embed_upsert count=6`, `embed_prune_removed=1` |
+| Exit | `0` — `PIPELINE_OK` |
+
+**Artifact:**
+
+| File | Mô tả |
+|------|--------|
+| `artifacts/logs/run_sprint1.log` | Log đầy đủ DoD Sprint 1 |
+| `artifacts/cleaned/cleaned_sprint1.csv` | 6 dòng sạch, sẵn embed |
+| `artifacts/quarantine/quarantine_sprint1.csv` | 4 dòng bị loại + cột `reason` |
+| `artifacts/manifests/manifest_sprint1.json` | Metadata run (run_id, số record, paths) |
+
+**4 dòng quarantine và lý do:**
+
+| reason | Ý nghĩa |
+|--------|---------|
+| `duplicate_chunk_text` | Trùng nội dung chunk refund |
+| `missing_effective_date` | Thiếu ngày + text rỗng |
+| `stale_hr_policy_effective_date` | HR bản 2025 (10 ngày phép) |
+| `unknown_doc_id` | `legacy_catalog_xyz_zzz` không trong allowlist |
+
+**Cách biết data “clean”:** dòng nằm trong `cleaned_*.csv`, không trong `quarantine_*.csv`; `doc_id` hợp lệ; `effective_date` ISO; refund đã 7 ngày; pass expectation halt.
+
+---
+
+### Bước 2 — Pipeline chuẩn (Sprint 2)
+
+**Hàm chạy:** Cùng chuỗi Bước 1. Sprint 2 tập trung **mở rộng** `clean_rows()` (≥3 rule) và `run_expectations()` (≥2 expectation) — mỗi rule/expectation mới phải có tác động đo được trên artifact.
+
+```powershell
+python etl_pipeline.py run
+# hoặc chỉ định run-id:
+python etl_pipeline.py run --run-id 2026-06-10T07-57Z
+```
+
+**Kết quả mẫu (run `2026-06-10T07-57Z`):** `10 raw → 6 cleaned + 4 quarantine`, expectations OK, embed 6 chunk, manifest ghi `run_timestamp` + `latest_exported_at`.
+
+**DoD Sprint 2:** exit `0`, không `PIPELINE_HALT`; nhóm thêm ≥3 rule (`cleaning_rules.py`) + ≥2 expectation (`expectations.py`) — ghi `metric_impact` trong `reports/group_report.md`.
+
+**Kiểm tra expectation riêng (không cần chạy full pipeline):**
+
+```powershell
+python -c "import csv; from pathlib import Path; from quality.expectations import run_expectations; rows=list(csv.DictReader(Path('artifacts/cleaned/cleaned_sprint1.csv').open(encoding='utf-8'))); results,halt=run_expectations(rows); [print(r.name, r.passed, r.severity) for r in results]; print('halt=', halt)"
+```
+
+---
+
+### Bước 3 — Eval retrieval (Sprint 3)
+
+**Hàm chạy:** `eval_retrieval.main()` → `col.query()` trên Chroma → so keyword trên **toàn bộ top-k** → ghi CSV.
+
+**Chạy sau khi đã embed:**
+
+```powershell
+python eval_retrieval.py --out artifacts/eval/before_after_eval.csv
+```
+
+**Kết quả mẫu (`before_after_eval.csv`):**
+
+| question_id | contains_expected | hits_forbidden | top1_doc_expected |
+|-------------|-------------------|----------------|-------------------|
+| `q_refund_window` | yes | **yes** ⚠️ | — |
+| `q_p1_sla` | yes | no | — |
+| `q_lockout` | yes | no | — |
+| `q_leave_version` | yes | no | yes |
+
+> `hits_forbidden=yes` trên `q_refund_window` = top-k vẫn còn chunk stale "14 ngày" trong vector store. **Chạy lại** `python etl_pipeline.py run` (không `--no-refund-fix`) để prune + upsert sạch, rồi eval lại trước khi nộp grading 17h.
+
+---
+
+### Bước 4 — Inject corruption (Sprint 3 — before/after)
+
+**Hàm chạy:** `cmd_run(--no-refund-fix, --skip-validate)` — `clean_rows(apply_refund_window_fix=False)` giữ refund 14 ngày → `run_expectations` FAIL nhưng embed vẫn chạy. Sau đó `eval_retrieval.main()` trên index “bẩn”.
+
+```powershell
+python etl_pipeline.py run --run-id inject-bad --no-refund-fix --skip-validate
+python eval_retrieval.py --out artifacts/eval/after_inject_bad.csv
+```
+
+**Kết quả inject (`run_id=inject-bad`):**
+
+| Mục | Giá trị |
+|-----|---------|
+| `expectation[refund_no_stale_14d_window]` | **FAIL** (violations=1) |
+| Pipeline | Tiếp tục embed do `--skip-validate` |
+| Log | `artifacts/logs/run_inject-bad.log` |
+| Manifest | `artifacts/manifests/manifest_inject-bad.json` |
+
+So sánh `after_inject_bad.csv` với `before_after_eval.csv` sau khi chạy lại pipeline chuẩn — chứng minh retrieval **tệ hơn** (inject) / **tốt hơn** (fix).
+
+---
+
+### Bước 5 — Freshness check (Sprint 4)
+
+**Hàm chạy:** `main()` → `cmd_freshness()` → `check_manifest_freshness()` → `parse_iso()` → in `PASS`/`FAIL` ra stdout.
+
+```powershell
+python etl_pipeline.py freshness --manifest artifacts/manifests/manifest_sprint1.json
+```
+
+**Kết quả mẫu:**
+
+```
+FAIL {"latest_exported_at": "2026-04-10T08:00:00", "age_hours": ~1463, "sla_hours": 24.0, "reason": "freshness_sla_exceeded"}
+```
+
+**Giải thích:** Freshness đo **tuổi data snapshot** (`exported_at` trong CSV), không đo lúc pipeline chạy. CSV mẫu cố ý cũ → FAIL **hợp lý**; ghi trong `docs/runbook.md`.
+
+---
+
+### Bước 6 — Grading (sau 17:00)
+
+**Hàm chạy:** `grading_run.main()` — logic query giống `eval_retrieval`, output JSONL. `instructor_quick_check.py` đọc JSONL/manifest để sanity check artifact nộp bài.
+
+```powershell
+python grading_run.py --out artifacts/eval/grading_run.jsonl
+```
+
+File `data/grading_questions.json` do GV public lúc **17:00** — trước đó luyện bằng:
+
+```powershell
+python grading_run.py --questions data/test_questions.json --out artifacts/eval/grading_run_practice.jsonl
+```
+
+**Kiểm tra nhanh (GV / tự sanity):**
+
+```powershell
+python instructor_quick_check.py --grading artifacts/eval/grading_run.jsonl
+python instructor_quick_check.py --manifest artifacts/manifests/manifest_sprint1.json
+```
+
+---
+
+### Tổng hợp artifact đã có (tham chiếu)
+
+| Loại | File mẫu |
+|------|----------|
+| Log | `run_sprint1.log`, `run_2026-06-10T07-57Z.log`, `run_inject-bad.log` |
+| Manifest | `manifest_sprint1.json`, `manifest_2026-06-10T07-57Z.json`, `manifest_inject-bad.json` |
+| Eval | `before_after_eval.csv`, `after_inject_bad.csv`, `grading_run.jsonl` (practice) |
+| Vector DB | `chroma_db/` (local, không commit) |
+
+**Một lệnh chạy end-to-end (copy vào group report):**
+
+```powershell
+python etl_pipeline.py run && python eval_retrieval.py --out artifacts/eval/before_after_eval.csv
+```
 
 ---
 

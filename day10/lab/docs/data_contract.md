@@ -8,7 +8,8 @@
 
 | Nguồn | Phương thức ingest | Failure mode chính | Metric / alert |
 |-------|-------------------|-------------------|----------------|
-| … | … | … | … |
+| `data/raw/policy_export_dirty.csv` (export KB từ catalog nội bộ) | `etl_pipeline.py run` → `load_raw_csv()` | Duplicate chunk, `doc_id` lạ (`legacy_catalog_*`), ngày `DD/MM/YYYY` | `quarantine_records` tăng; alert nếu > 30% raw |
+| `data/docs/*.txt` (canonical policy CS + IT) | Tham chiếu contract; không ingest trực tiếp trong Sprint 1 | Version conflict HR (10 vs 12 ngày), refund stale 14 ngày | `expectation[refund_no_stale_14d_window]` halt; `hits_forbidden` trên eval |
 
 ---
 

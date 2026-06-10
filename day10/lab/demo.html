@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Day 10 Lab — Pipeline & Observability Demo</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --surface2: #243044;
+      --border: #2d3a4f;
+      --text: #e8edf4;
+      --muted: #8b9cb3;
+      --accent: #3dd6c6;
+      --accent-dim: #2a9d8f;
+      --pass: #4ade80;
+      --fail: #f87171;
+      --warn: #fbbf24;
+      --halt: #fb7185;
+      --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+      --mono: "Cascadia Code", "Consolas", monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+      min-height: 100vh;
+    }
+    header {
+      padding: 2rem 2rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(135deg, #1a2332 0%, #0f1419 60%);
+    }
+    header h1 { font-size: 1.6rem; font-weight: 650; letter-spacing: -0.02em; }
+    header p { color: var(--muted); margin-top: 0.4rem; font-size: 0.95rem; }
+    .badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.2rem 0.55rem;
+      border-radius: 4px;
+      background: var(--accent-dim);
+      color: #fff;
+      margin-top: 0.75rem;
+    }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 2rem 3rem; }
+    section { margin-bottom: 2.25rem; }
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 0.85rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    h2::before {
+      content: "";
+      width: 4px;
+      height: 1.1em;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.1rem 1.25rem;
+    }
+    .flow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.35rem 0.5rem;
+      font-size: 0.88rem;
+    }
+    .flow span.step {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.75rem;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+    .flow .arrow { color: var(--muted); font-size: 1.1rem; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+    .metric {
+      background: var(--surface2);
+      border-radius: 8px;
+      padding: 0.85rem;
+      text-align: center;
+    }
+    .metric .val { font-size: 1.75rem; font-weight: 700; color: var(--accent); }
+    .metric .lbl { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .tab {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 0.45rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-family: inherit;
+      transition: 0.15s;
+    }
+    .tab:hover { color: var(--text); border-color: var(--accent-dim); }
+    .tab.active {
+      background: var(--accent-dim);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.55rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    tr:last-child td { border-bottom: none; }
+    .status {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+    }
+    .status.pass { background: rgba(74, 222, 128, 0.15); color: var(--pass); }
+    .status.fail { background: rgba(248, 113, 113, 0.15); color: var(--fail); }
+    .status.warn { background: rgba(251, 191, 36, 0.15); color: var(--warn); }
+    .status.halt { background: rgba(251, 113, 133, 0.15); color: var(--halt); }
+    code, pre {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+    }
+    pre {
+      background: #0a0e14;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      overflow-x: auto;
+      color: #a8b8cc;
+      line-height: 1.45;
+    }
+    .cmd { color: var(--accent); }
+    .note {
+      margin-top: 0.75rem;
+      padding: 0.75rem 1rem;
+      background: rgba(61, 214, 198, 0.08);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 6px 6px 0;
+      font-size: 0.86rem;
+      color: var(--muted);
+    }
+    .note strong { color: var(--text); }
+    footer {
+      text-align: center;
+      padding: 1.5rem;
+      color: var(--muted);
+      font-size: 0.78rem;
+      border-top: 1px solid var(--border);
+    }
+    @media (max-width: 640px) {
+      header, main { padding-left: 1rem; padding-right: 1rem; }
+      .flow { flex-direction: column; align-items: stretch; }
+      .flow .arrow { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Data Pipeline &amp; Observability — Lab Day 10</h1>
+    <p>Demo artifact: ingest → clean → validate → embed → freshness / retrieval eval</p>
+    <span class="badge">CS + IT Helpdesk · Case xuyên suốt Day 08–10</span>
+  </header>
+
+  <main>
+    <section>
+      <h2>Luồng pipeline</h2>
+      <div class="card">
+        <div class="flow">
+          <span class="step">📥 Raw CSV</span>
+          <span class="arrow">→</span>
+          <span class="step">🧹 Clean + Quarantine</span>
+          <span class="arrow">→</span>
+          <span class="step">✓ Expectations</span>
+          <span class="arrow">→</span>
+          <span class="step">🔢 Embed Chroma</span>
+          <span class="arrow">→</span>
+          <span class="step">📋 Manifest + Log</span>
+          <span class="arrow">→</span>
+          <span class="step">🔍 Retrieval eval</span>
+        </div>
+        <div class="metrics" id="run-metrics"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>So sánh 2 lần chạy</h2>
+      <div class="tabs">
+        <button class="tab active" data-tab="clean">Run chuẩn (07-24Z)</button>
+        <button class="tab" data-tab="inject">Inject bad (Sprint 3)</button>
+      </div>
+      <div class="card panel active" id="panel-clean">
+        <table>
+          <thead>
+            <tr><th>Expectation</th><th>Kết quả</th><th>Severity</th><th>Chi tiết</th></tr>
+          </thead>
+          <tbody id="exp-clean"></tbody>
+        </table>
+      </div>
+      <div class="card panel" id="panel-inject">
+        <table>
+          <thead>
+            <tr><th>Expectation</th><th>Kết quả</th><th>Severity</th><th>Chi tiết</th></tr>
+          </thead>
+          <tbody id="exp-inject"></tbody>
+        </table>
+        <p class="note"><strong>Sprint 3:</strong> <code>--no-refund-fix --skip-validate</code> — expectation refund FAIL nhưng pipeline vẫn embed để demo corruption.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Freshness check</h2>
+      <div class="card">
+        <table>
+          <tr><th>Trường</th><th>Giá trị</th></tr>
+          <tr><td>latest_exported_at</td><td>2026-04-10T08:00:00</td></tr>
+          <tr><td>age_hours</td><td>~1463 h</td></tr>
+          <tr><td>sla_hours</td><td>24</td></tr>
+          <tr><td>Kết quả</td><td><span class="status fail">FAIL</span> freshness_sla_exceeded</td></tr>
+        </table>
+        <p class="note">
+          <strong>Đúng thiết kế lab:</strong> CSV mẫu có <code>exported_at</code> cũ (10/04).
+          Pipeline chạy OK nhưng freshness báo data snapshot stale — đúng tinh thần observability
+          (kiểm tra dữ liệu, không chỉ kiểm tra job chạy xong).
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Retrieval eval (golden questions)</h2>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Câu hỏi</th>
+              <th>Top-1 doc</th>
+              <th>Expected</th>
+              <th>Forbidden</th>
+              <th>Top1 match</th>
+            </tr>
+          </thead>
+          <tbody id="eval-rows"></tbody>
+        </table>
+        <p class="note">
+          <strong>hits_forbidden=yes</strong> trên <code>q_refund_window</code> = top-k vẫn còn chunk stale "14 ngày".
+          Chạy lại <code>python etl_pipeline.py run</code> (không <code>--no-refund-fix</code>) rồi eval lại trước khi nộp grading 17h.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Lệnh chạy (copy)</h2>
+      <div class="card">
+        <pre><span class="cmd"># Pipeline chuẩn</span>
+python etl_pipeline.py run
+
+<span class="cmd"># Freshness</span>
+python etl_pipeline.py freshness --manifest artifacts/manifests/manifest_2026-06-10T07-24Z.json
+
+<span class="cmd"># Eval retrieval</span>
+python eval_retrieval.py --out artifacts/eval/before_after_eval.csv
+
+<span class="cmd"># Inject (Sprint 3)</span>
+python etl_pipeline.py run --run-id inject-bad --no-refund-fix --skip-validate
+
+<span class="cmd"># Grading (sau 17:00)</span>
+python grading_run.py --out artifacts/eval/grading_run.jsonl</pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Lab Day 10 · AICB-P1 · Mở file này bằng trình duyệt (double-click demo.html)
+  </footer>
+
+  <script>
+    const RUNS = {
+      clean: {
+        run_id: "2026-06-10T07-24Z",
+        raw: 10, cleaned: 6, quarantine: 4,
+        expectations: [
+          { name: "min_one_row", pass: true, severity: "halt", detail: "cleaned_rows=6" },
+          { name: "no_empty_doc_id", pass: true, severity: "halt", detail: "empty_doc_id_count=0" },
+          { name: "refund_no_stale_14d_window", pass: true, severity: "halt", detail: "violations=0" },
+          { name: "chunk_min_length_8", pass: true, severity: "warn", detail: "short_chunks=0" },
+          { name: "effective_date_iso_yyyy_mm_dd", pass: true, severity: "halt", detail: "non_iso_rows=0" },
+          { name: "hr_leave_no_stale_10d_annual", pass: true, severity: "halt", detail: "violations=0" },
+        ],
+      },
+      inject: {
+        run_id: "inject-bad",
+        raw: 10, cleaned: 6, quarantine: 4,
+        expectations: [
+          { name: "min_one_row", pass: true, severity: "halt", detail: "cleaned_rows=6" },
+          { name: "no_empty_doc_id", pass: true, severity: "halt", detail: "empty_doc_id_count=0" },
+          { name: "refund_no_stale_14d_window", pass: false, severity: "halt", detail: "violations=1" },
+          { name: "chunk_min_length_8", pass: true, severity: "warn", detail: "short_chunks=0" },
+          { name: "effective_date_iso_yyyy_mm_dd", pass: true, severity: "halt", detail: "non_iso_rows=0" },
+          { name: "hr_leave_no_stale_10d_annual", pass: true, severity: "halt", detail: "violations=0" },
+        ],
+      },
+    };
+
+    const EVAL = [
+      { id: "q_refund_window", q: "Hoàn tiền — bao nhiêu ngày?", doc: "policy_refund_v4", exp: true, forb: true, top1: null },
+      { id: "q_p1_sla", q: "SLA phản hồi P1?", doc: "sla_p1_2026", exp: true, forb: false, top1: null },
+      { id: "q_lockout", q: "Đăng nhập sai bao nhiêu lần?", doc: "it_helpdesk_faq", exp: true, forb: false, top1: null },
+      { id: "q_leave_version", q: "Nghỉ phép dưới 3 năm?", doc: "hr_leave_policy", exp: true, forb: false, top1: true },
+    ];
+
+    function renderMetrics(run) {
+      const el = document.getElementById("run-metrics");
+      el.innerHTML = `
+        <div class="metric"><div class="val">${run.raw}</div><div class="lbl">Raw records</div></div>
+        <div class="metric"><div class="val">${run.cleaned}</div><div class="lbl">Cleaned</div></div>
+        <div class="metric"><div class="val">${run.quarantine}</div><div class="lbl">Quarantine</div></div>
+        <div class="metric"><div class="val" style="font-size:1rem;padding-top:0.4rem">${run.run_id}</div><div class="lbl">run_id</div></div>
+      `;
+    }
+
+    function renderExp(tbodyId, expectations) {
+      const tbody = document.getElementById(tbodyId);
+      tbody.innerHTML = expectations.map((e) => {
+        const st = e.pass ? "pass" : "fail";
+        const label = e.pass ? "PASS" : "FAIL";
+        const sev = e.severity === "halt" ? "halt" : "warn";
+        return `<tr>
+          <td><code>${e.name}</code></td>
+          <td><span class="status ${st}">${label}</span></td>
+          <td><span class="status ${sev}">${e.severity}</span></td>
+          <td>${e.detail}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderEval() {
+      const tbody = document.getElementById("eval-rows");
+      tbody.innerHTML = EVAL.map((r) => {
+        const expCls = r.exp ? "pass" : "fail";
+        const forbCls = r.forb ? "fail" : "pass";
+        const top1 = r.top1 === null ? "—" : (r.top1 ? '<span class="status pass">yes</span>' : '<span class="status fail">no</span>');
+        return `<tr>
+          <td><code>${r.id}</code><br><span style="color:var(--muted);font-size:0.78rem">${r.q}</span></td>
+          <td><code>${r.doc}</code></td>
+          <td><span class="status ${expCls}">${r.exp ? "yes" : "no"}</span></td>
+          <td><span class="status ${forbCls}">${r.forb ? "yes" : "no"}</span></td>
+          <td>${top1}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    document.querySelectorAll(".tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+        btn.classList.add("active");
+        const tab = btn.dataset.tab;
+        document.getElementById(`panel-${tab}`).classList.add("active");
+        renderMetrics(RUNS[tab]);
+      });
+    });
+
+    renderMetrics(RUNS.clean);
+    renderExp("exp-clean", RUNS.clean.expectations);
+    renderExp("exp-inject", RUNS.inject.expectations);
+    renderEval();
+  </script>
+</body>
+</html>
